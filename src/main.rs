@@ -22,7 +22,7 @@ fn parser() {
     let mut contents = String::new();
     file.read_to_string(&mut contents).unwrap();
     let mut map = HashMap::new();
-    let func = function_parser( contents.as_bytes(), &module, &builder, &mut map, &ctx);
+    let func = parse( contents.as_bytes(), &module, &builder, &mut map, &ctx);
     println!("{:?}", func);
 }
 
@@ -92,6 +92,15 @@ fn extract<'a, 'b>(x: Vec<String>, ctx: &'a CBox<Context>) -> Vec<(String, &'a T
     }).collect()
 }
 
+named_args!(parse <'a>( module: &'a CSemiBox<Module>,
+                        builder: &'a CSemiBox<Builder>,
+                        map: &mut HashMap<String, &'a Value>,
+                        ctx: &'a CBox<Context>)
+                        <Vec<FunctionIR<'a>>>, many0!( apply!(
+                            function_parser, module, builder, map, ctx
+                        ))
+);
+
 named_args!(function_parser<'a>(module: &'a CSemiBox<Module>,
                                 builder: &'a CSemiBox<Builder>,
                                 map: &mut HashMap<String, &'a Value>,
@@ -125,35 +134,50 @@ named_args!(func_type<'a>(module: &'a CSemiBox<Module>,
             ctx,
         );
         func.add_arguments_to_map(map);
-        println!("{:?}", map);
         func
         })
 ));
 
-named_args!(body_parse<'a>(ctx: &'a CBox<Context>, builder: &'a CSemiBox<Builder>, map: &HashMap<String, &'a Value>)<&'a Value>, do_parse!(
+named_args!(body_parse<'a>(ctx: &'a CBox<Context>, builder: &'a CSemiBox<Builder>, map: &mut HashMap<String, &'a Value>)<&'a Value>, do_parse!(
     init: apply!(value, map, ctx) >>
     res: fold_many0!(
-        pair!(alt!(tag!("+") | tag!("-")), apply!(value, map, ctx)),
+        pair!(operators, apply!(value, map, ctx)),
         init,
-        | acc, (op, val): (&[u8], &'a Value)| {
-            println!("left {:?}, right {:?}", acc, val);
-            if (op[0] as char) == '+' {builder.build_add(acc, val)} else {builder.build_sub(acc, val)}
-        }
+        | acc, (op, val): (&[u8], &'a Value)| apply_operators(op, acc, val, builder)
     ) >>
-    (res)
+    ({
+        map.clear();
+        res
+    })
 ));
+
+named!(operators, alt!(
+    tag!("+") |
+    tag!("-") |
+    tag!("*") |
+    tag!("/")
+));
+
+fn apply_operators<'a>(op: &[u8], left: &'a Value, right: &'a Value, builder: &'a CSemiBox<Builder>) -> &'a Value {
+    match op[0] as char {
+        '+' => builder.build_add(left, right),
+        '-' => builder.build_sub(left, right),
+        '*' => builder.build_mul(left, right),
+        '/' => builder.build_div(left, right),
+        _ => left
+    }
+}
 
 named_args!(value<'a>(map: &HashMap<String, &'a Value>, ctx: &'a CBox<Context>)<&'a Value>, alt!(
     apply!(number_to_val,ctx) | apply!(alias_to_val, map)
 ));
 
-named!(alias<String>,
+named!(alias<String>,map_res!(
     map_res!(
-      map_res!(
         ws!(alpha),
         str::from_utf8
-      ),
-      FromStr::from_str
+    ),
+    FromStr::from_str
 ));
 
 named!(number<i64>,
