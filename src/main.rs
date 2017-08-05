@@ -1,26 +1,17 @@
-extern crate llvm_sys;
 #[macro_use]
 extern crate nom;
 extern crate llvm;
 
-use nom::{IResult,digit, alpha};
+use nom::{digit, alpha};
 
 use llvm::*;
-use llvm::Attribute::*;
-use llvm_sys::*;
-use llvm_sys::analysis::*;
-use llvm_sys::core::*;
 
 use std::collections::HashMap;
-use std::ffi::CString;
 use std::fmt;
 use std::fs::File;
-use std::ptr;
 use std::io::Read;
 use std::str;
-use std::path::Path;
 use std::str::FromStr;
-use std::prelude::*;
 
 fn parser() {
     let ctx = Context::new();
@@ -52,7 +43,6 @@ struct FunctionIR<'a> {
     name: String,
     func_type: &'a FunctionType,
     func: &'a Function,
-    entry: &'a BasicBlock,
     def: FunctionDef<'a>
 }
 
@@ -71,7 +61,7 @@ impl<'a> FunctionIR<'a> {
             name: name,
             args: args,
             ret_type};
-        FunctionIR {name: def.name.clone(), func_type, func, entry, def}
+        FunctionIR {name: def.name.clone(), func_type, func, def}
     }
     pub fn add_arguments_to_map(&self, map: &mut HashMap<String, &'a Value>) {
         let x = self.def.args.len();
@@ -188,46 +178,4 @@ num: number >>
 
 fn main() {
     parser()
-}
-
-fn hello_world() {
-let hello = "hello world";
-let ctx = Context::new();
-let module = Module::new("main", &ctx);
-let builder = Builder::new(&ctx);
-
-let func = module.add_function("main", Type::get::<fn() -> i32>(&ctx));
-let entry = func.append("entry");
-builder.position_at_end(entry);
-
-let msg = module.add_global("msg", Type::array_type::<i8>(&ctx, hello.len() + 1));
-
-msg.set_constant(true);
-msg.set_initializer(Value::new_string(&ctx, hello, false));
-msg.set_linkage(LLVMLinkage::LLVMLinkerPrivateLinkage);
-
-let puts = module.add_function("puts", Type::get::<fn(*const i8) -> i32>(&ctx));
-
-let cast = builder.build_gep(msg, &[0i32.compile(&ctx),0i32.compile(&ctx)]);
-
-builder.build_call(puts, &[cast]);
-
-builder.build_ret(0i32.compile(&ctx));
-module.verify().unwrap();
-module.print_to_file(Path::new("out.ll"));
-}
-
-fn add() {
-    let ctx = Context::new();
-    let module = Module::new("add", &ctx);
-    let func = module.add_function("add", Type::get::<fn(f64, f64) -> f64>(&ctx));
-    let entry = func.append("entry");
-    let builder = Builder::new(&ctx);
-    builder.position_at_end(entry);
-    let a = &func[0];
-    let b = &func[1];
-    let value = builder.build_add(a, b);
-    builder.build_ret(value);
-    module.verify().unwrap();
-    println!("{:?}", module);
 }

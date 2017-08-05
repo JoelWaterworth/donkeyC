@@ -8,5 +8,4 @@ name = "main"
 
 [dependencies]
 llvm-alt =  { version = "0.5.0", path = "../llvm-rs" }
-llvm-sys = "40.0.4"
 nom = "3.1.0"
