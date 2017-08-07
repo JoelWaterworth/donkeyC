@@ -9,3 +9,4 @@ name = "main"
 [dependencies]
 llvm-alt =  { version = "0.5.0", path = "../llvm-rs" }
 nom = "3.1.0"
+libc = "0.2"

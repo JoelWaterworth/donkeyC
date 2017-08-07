@@ -3,3 +3,5 @@ add x y :=
 
 sub x y :=
     x - y
+
+foo

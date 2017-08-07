@@ -1,8 +1,9 @@
 #[macro_use]
 extern crate nom;
 extern crate llvm;
+extern crate libc;
 
-use nom::{digit, alpha};
+use nom::{digit, alpha, alphanumeric};
 
 use llvm::*;
 
@@ -13,24 +14,57 @@ use std::io::Read;
 use std::str;
 use std::str::FromStr;
 
-fn parser() {
+#[derive(Debug)]
+struct AliasAndFunctions<'a>{
+    values: HashMap<String, &'a Value>,
+    functions: HashMap<String, FunctionIR<'a>>,
+}
+
+impl<'a> AliasAndFunctions<'a> {
+    pub fn new() -> AliasAndFunctions<'a> {
+        AliasAndFunctions { values: HashMap::new(), functions: HashMap::new() }
+    }
+    pub fn insert_func(&mut self, name: String, val: FunctionIR<'a>) -> Option<FunctionIR<'a>> {
+        self.functions.insert(name, val)
+    }
+
+    pub fn add_vals(&mut self, mut vals: Vec<(String, &'a Value)>) {
+        for (k,v) in vals.drain(0..) {
+            self.values.insert(k,v);
+        }
+    }
+
+    pub fn get_function(&self, name: &String) -> &FunctionIR<'a> {
+        let func = self.functions.get(name);
+        match func {
+            Some(x) => x,
+            None => panic!("could not find {}", name ),
+        }
+    }
+}
+
+fn bytes_to_string(b: &[u8]) -> String {
+    FromStr::from_str(str::from_utf8(b).unwrap()).unwrap()
+}
+
+fn func_type_parser() {
     let ctx = Context::new();
     let module = Module::new("main", &ctx);
     let builder = Builder::new(&ctx);
 
-    let mut file = File::open("exampleCode/main.donk").unwrap();
+    let mut file = File::open("exampleCode/add.donk").unwrap();
     let mut contents = String::new();
     file.read_to_string(&mut contents).unwrap();
-    let mut map = HashMap::new();
-    let func = parse( contents.as_bytes(), &module, &builder, &mut map, &ctx);
-    println!("{:?}", func);
-}
-
-#[derive(Debug)]
-struct FunctionDef<'a> {
-    pub name: String,
-    pub args: Vec<(String, &'a Type)>,
-    pub ret_type: &'a Type,
+    let mut map = AliasAndFunctions::new();
+    function_type_parser( contents.as_bytes(), &mut map, &module, &builder, &ctx);
+    parse_rest( contents.as_bytes(), &builder, &map, &ctx);
+    //let func = debug( contents.as_bytes());
+    println!("{:?}", map);
+    module.verify();
+    let ee = JitEngine::new(&module, JitOptions {opt_level: 3}).unwrap();
+    ee.with_function(map.get_function(&String::from("foo")).func, |add:extern fn((f64, f64)) -> f64| {
+        println!("{} + {} = {}", 1., 2., add((1., 2.)));
+    });
 }
 
 pub fn get_arg_types<'a>(x: &Vec<(String, &'a Type)>) -> Vec<&'a Type> {
@@ -40,34 +74,43 @@ pub fn get_arg_types<'a>(x: &Vec<(String, &'a Type)>) -> Vec<&'a Type> {
 }
 
 struct FunctionIR<'a> {
-    name: String,
-    func_type: &'a FunctionType,
-    func: &'a Function,
-    def: FunctionDef<'a>
+    pub name: String,
+    pub func_type: &'a FunctionType,
+    pub func: &'a Function,
+    pub args: Vec<&'a Type>,
+    pub ret_type: &'a Type,
+    pub entry: &'a BasicBlock,
 }
 
 impl<'a> FunctionIR<'a> {
     pub fn new(name: String,
-                args: Vec<(String, &'a Type)>,
+                args: Vec<&'a Type>,
                 ret_type: &'a Type,
                 module: &'a CSemiBox<Module>,
                 builder: &'a Builder,
                 ctx: &'a CBox<Context>) -> Self {
-        let func_type = FunctionType::new(ret_type, &get_arg_types(&args));
+        let func_type = FunctionType::new(ret_type, &args);
         let func = module.add_function(&name, func_type);
         let entry = func.append("entry");
         builder.position_at_end(entry);
-        let def = FunctionDef {
-            name: name,
-            args: args,
-            ret_type};
-        FunctionIR {name: def.name.clone(), func_type, func, def}
+        FunctionIR {name: name.clone(), func_type, func, args, ret_type, entry}
     }
-    pub fn add_arguments_to_map(&self, map: &mut HashMap<String, &'a Value>) {
-        let x = self.def.args.len();
-        for i  in 0..x {
-          map.insert(self.def.args[i].0.clone(), &self.func[i]);
-        };
+
+    pub fn set_current(&self, builder: &'a Builder) {
+        builder.position_at_end(self.entry);
+    }
+
+    pub fn arg_len(&self) -> usize {
+        self.args.len()
+    }
+
+    pub fn get_args_with_name(&self, mut names: Vec<String>) -> Vec<(String, &'a Value)> {
+        let mut v:Vec<(String, &'a Value)> = Vec::new();
+
+        for (i, name) in names.drain(0..).enumerate() {
+            v.insert(i,(name, &self.func[i]));
+        }
+        v
     }
 }
 
@@ -85,71 +128,143 @@ named!(args_parser<Vec<String>>, many0!(map_res!(
     )
 ));
 
-fn extract<'a, 'b>(x: Vec<String>, ctx: &'a CBox<Context>) -> Vec<(String, &'a Type)> {
-    x.iter().map(|x| {
-        let s = x.clone();
-        (s, Type::get::<i64>(ctx))
-    }).collect()
-}
+named!(debug<&[u8]>, take_until!("\n"));
 
-named_args!(parse <'a>( module: &'a CSemiBox<Module>,
-                        builder: &'a CSemiBox<Builder>,
-                        map: &mut HashMap<String, &'a Value>,
-                        ctx: &'a CBox<Context>)
-                        <Vec<FunctionIR<'a>>>, many0!( apply!(
-                            function_parser, module, builder, map, ctx
-                        ))
+named_args!(parse_rest <'a>(builder: &'a CSemiBox<Builder>,
+                            map: &'a AliasAndFunctions<'a>,
+                            ctx: &'a CBox<Context>)
+                            <Vec<bool>>, many0!( do_parse!(
+                                func: alt!(
+                                    import_parse |
+                                    apply!(function_parser, builder, map, ctx)
+                                    ) >>
+                                ({
+                                    func
+                                })
+                            ))
 );
 
-named_args!(function_parser<'a>(module: &'a CSemiBox<Module>,
-                                builder: &'a CSemiBox<Builder>,
-                                map: &mut HashMap<String, &'a Value>,
-                                ctx: &'a CBox<Context>)
-                                <FunctionIR<'a>>, do_parse!(
-    func: apply!(func_type, module, builder, map, ctx)>>
-    body: apply!(body_parse, ctx, builder, map) >>
-    ({
-        builder.build_ret(body);
-        func
-    })
+named!(import_parse<bool>, do_parse!(
+    tag!("import") >>
+    module: alias >>
+    (false)
 ));
 
-
-
-named_args!(func_type<'a>(module: &'a CSemiBox<Module>,
-                          builder: &'a CSemiBox<Builder>,
-                          map: &mut HashMap<String, &'a Value>,
-                          ctx: &'a CBox<Context>)
-                          <FunctionIR<'a>>, do_parse!(
+named_args!(function_body <'a>(builder: &'a CSemiBox<Builder>,
+                              map: &'a AliasAndFunctions<'a>,
+                              ctx: &'a CBox<Context>)
+                              <HashMap<String, &'a Value>>, do_parse!(
+    nametype: alias >>
+    take_until!("\n") >>
     name: alias >>
-    args:  take_until!(":=") >>
+    args: take_until!(":=") >>
     tag!(":=") >>
     ({
-        let func = FunctionIR::new(
-            name,
-            extract(args_parser(args).unwrap().1, ctx),
-            Type::get::<i64>(ctx),
-            module,
-            builder,
-            ctx,
-        );
-        func.add_arguments_to_map(map);
-        func
+        if nametype != name { panic!("{} and {} should be the same", nametype, name)}
+        let mut vals = HashMap::new();
+        let func = map.get_function(&name);
+        let mut fx = func.get_args_with_name(args_parser(args).unwrap().1);
+        for (k,v) in fx.drain(0..) {
+            vals.insert(k,v);
+        }
+        func.set_current(builder);
+        vals
         })
 ));
 
-named_args!(body_parse<'a>(ctx: &'a CBox<Context>, builder: &'a CSemiBox<Builder>, map: &mut HashMap<String, &'a Value>)<&'a Value>, do_parse!(
-    init: apply!(value, map, ctx) >>
+named_args!(entry<'a>(vals: &'a HashMap<String, &'a Value>, map: &'a AliasAndFunctions, builder: &'a CSemiBox<Builder>, ctx: &'a CBox<Context>)<&'a Value>, do_parse!(
+    init: apply!(value, vals, map, builder, ctx) >>
     res: fold_many0!(
-        pair!(operators, apply!(value, map, ctx)),
+        pair!(operators, apply!(value, vals, map, builder, ctx)),
         init,
         | acc, (op, val): (&[u8], &'a Value)| apply_operators(op, acc, val, builder)
     ) >>
     ({
-        map.clear();
         res
     })
 ));
+
+named_args!(function_parser<'a>(builder: &'a CSemiBox<Builder>,
+                                map: &'a AliasAndFunctions<'a>,
+                                ctx: &'a CBox<Context>)
+                                <bool>, do_parse!(
+    vals: apply!(function_body, builder, map, ctx)>>
+    body: apply!(entry, &vals, map, builder, ctx) >>
+    ({
+        builder.build_ret(body);
+        true
+    })
+));
+
+named_args!(foo<'a>(map: &mut AliasAndFunctions<'a>, module: &'a CSemiBox<Module>, builder: &'a CSemiBox<Builder>, ctx: &'a CBox<Context>)<Vec<u8>>,
+    do_parse!(
+        x: many0!(apply!(function_type_parser, map, module, builder, ctx)) >>
+        ({
+            let mut v = Vec::new();
+            for i in x.clone().iter_mut() {
+                v.append(&mut i.to_vec());
+            }
+            v
+        })
+));
+
+named_args!(function_type_parser<'a>(map: &mut AliasAndFunctions<'a>, module: &'a CSemiBox<Module>, builder: &'a CSemiBox<Builder>, ctx: &'a CBox<Context>)<Vec<u8>>,
+    do_parse!(
+        x: many0!(alt!(apply!(function_type, map, module, builder, ctx) | take_until!("\n"))) >>
+        ({
+            let mut v = Vec::new();
+            v
+        })
+));
+
+named_args!(function_type<'a>(map: &mut AliasAndFunctions<'a>, module: &'a CSemiBox<Module>, builder: &'a CSemiBox<Builder>, ctx: &'a CBox<Context>)<&'a [u8]>, do_parse!(
+    name: alias >>
+    tag!(":") >>
+    args: ws!(apply!(bracketed, ctx)) >>
+    ws!(tag!("->")) >>
+    ret: ws!(string) >>
+    ({
+        let f = FunctionIR::new(name.clone(), args, string_to_type(ret, ctx).unwrap(), module, builder, ctx);
+        map.insert_func(name, f);
+        &[]
+    })
+));
+
+named_args!(bracketed<'a>(ctx: &'a CBox<Context>)<Vec<&'a Type>>,
+    delimited!(
+        tag!("("),
+        many0!(apply!(type_parse, ctx)),
+        tag!(")")
+    )
+);
+
+named!(string<String>, map_res!(
+    map_res!(
+        ws!(alphanumeric),
+        str::from_utf8
+    ),
+    FromStr::from_str
+));
+
+named!(parenthese_ending, ws!(alt!(tag!(",") | tag!(""))));
+
+named_args!(type_parse<'a>(ctx: &'a CBox<Context>)<&'a Type>, do_parse!(
+    typ: string >>
+    parenthese_ending >>
+    (string_to_type(typ, ctx).unwrap())
+));
+
+fn string_to_type<'a>(string: String, ctx: &'a CBox<Context>) -> Option<&'a Type> {
+    match string.as_ref() {
+        "i64" => Some(Type::get::<i64>(ctx)),
+        "u64" => Some(Type::get::<u64>(ctx)),
+        "i32" => Some(Type::get::<i32>(ctx)),
+        "u32" => Some(Type::get::<u32>(ctx)),
+        "f32" => Some(Type::get::<f32>(ctx)),
+        "f64" => Some(Type::get::<f64>(ctx)),
+        _     => None
+    }
+}
 
 named!(operators, alt!(
     tag!("+") |
@@ -168,8 +283,8 @@ fn apply_operators<'a>(op: &[u8], left: &'a Value, right: &'a Value, builder: &'
     }
 }
 
-named_args!(value<'a>(map: &HashMap<String, &'a Value>, ctx: &'a CBox<Context>)<&'a Value>, alt!(
-    apply!(number_to_val,ctx) | apply!(alias_to_val, map)
+named_args!(value<'a>(val: &'a HashMap<String, &'a Value>, map: &'a AliasAndFunctions, builder: &'a CSemiBox<Builder>, ctx: &'a CBox<Context>)<&'a Value>, alt!(
+    apply!(number_to_val,ctx) | apply!(func_call, val, map, builder, ctx) | apply!(alias_to_val, val)
 ));
 
 named!(alias<String>,map_res!(
@@ -180,7 +295,7 @@ named!(alias<String>,map_res!(
     FromStr::from_str
 ));
 
-named!(number<i64>,
+named!(number<f64>,
     map_res!(
       map_res!(
         ws!(digit),
@@ -189,10 +304,37 @@ named!(number<i64>,
       FromStr::from_str
 ));
 
-named_args!(alias_to_val<'a>(values: &HashMap<String, &'a Value>)<&'a Value>,  do_parse!(
+named_args!(func_call<'a>(vals: &'a HashMap<String, &'a Value>, map: &'a AliasAndFunctions, builder: &'a CSemiBox<Builder>, ctx: &'a CBox<Context>)<&'a Value>, do_parse!(
+    name: alias >>
+    args: delimited!(
+              tag!("("),
+              many0!(apply!(arg_parser, vals, map, builder, ctx)),
+              tag!(")")
+          ) >>
+    ({
+        println!("{:?}", vals);
+        println!("{:?}", args);
+        builder.build_call(map.get_function(&name).func, &args)
+    })
+));
+
+named_args!(arg_parser<'a>(vals: &'a HashMap<String, &'a Value>, map: &'a AliasAndFunctions, builder: &'a CSemiBox<Builder>, ctx: &'a CBox<Context>)<&'a Value>, do_parse!(
+    arg: apply!(value, vals, map, builder, ctx) >>
+    parenthese_ending >>
+    (arg)
+));
+
+named_args!(alias_to_val<'a>(values: &'a HashMap<String, &'a Value>)<&'a Value>,  do_parse!(
     val: alias >>
     ({
-        values.get(&val).unwrap()})
+        match values.get(&val) {
+            Some(x) => x,
+            None => {
+                println!("{:?}", values);
+                panic!("could not find {}", val )
+            },
+        }
+    })
 ));
 
 named_args!(number_to_val<'a>(ctx: &'a CBox<Context>)<&'a Value>, do_parse!(
@@ -201,5 +343,5 @@ num: number >>
 ));
 
 fn main() {
-    parser()
+    func_type_parser()
 }

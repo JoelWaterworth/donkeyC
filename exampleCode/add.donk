@@ -1,2 +1,7 @@
-add: (i64,i64) -> i64
-add x y := x + y
+import x
+
+foo: (f64, f64) -> f64
+foo x y := x + y
+
+bar: (f64) -> f64
+bar x := foo(5, 5)
