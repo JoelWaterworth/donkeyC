@@ -1,7 +1,5 @@
-import x
-
-foo: (f64, f64) -> f64
+foo: (F64, F64) -> F64
 foo x y := x + y
 
-bar: (f64) -> f64
-bar x := foo(5, 5)
+bar: (F64) -> F64
+bar x := foo(x, 5)

@@ -1,0 +1,9 @@
+add: ( F64 , F64 ) -> F64
+add x y := x + y
+
+sub: ( F64 , F64 ) -> F64
+sub x y := x - y
+
+foo: ( F64 , F64 ) -> F64
+foo x y := add(x,y)
+
